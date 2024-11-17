@@ -475,9 +475,11 @@ void write(const char *data, int rep, const char *path) {
 
         // Copia os próximos bytes do dado para o bloco
         int bytes_to_copy = (data_length - bytes_written > BLOCK_SIZE) ? BLOCK_SIZE : (data_length - bytes_written);
-        strncpy((char *)data_block, data + (bytes_written % strlen(data)), bytes_to_copy);
-        write_block("filesystem.dat", current_block, data_block);
+        for (int i = 0; i < bytes_to_copy; i++) {
+            data_block[i] = data[(bytes_written + i) % strlen(data)];
+        }
 
+        write_block("filesystem.dat", current_block, data_block);
         bytes_written += bytes_to_copy;
 
         if (bytes_written < data_length) {
@@ -515,36 +517,98 @@ void write(const char *data, int rep, const char *path) {
 
 void append(const char *data, int rep, const char *path) {
     struct dir_entry_s entry;
-    int file_block = find_file_block(path);  // Use find_file_block para localizar o arquivo
+    int file_block = find_file_block(path);  // Localiza o bloco inicial do arquivo
 
     if (file_block == -1) {
         printf("Erro: Arquivo '%s' não encontrado.\n", path);
         return;
     }
 
-    // Carrega o bloco de dados do arquivo existente
-    read_block("filesystem.dat", file_block, data_block);
-    for (int j = 0; j < rep; j++) {
-        strcat((char *)data_block, data);
+    // Calcula o tamanho total dos dados a serem anexados
+    int data_length = strlen(data) * rep;
+
+    // Localiza o último bloco usado pelo arquivo
+    int current_block = file_block;
+    while (fat[current_block] != 0x7fff) {
+        current_block = fat[current_block];
     }
 
-    entry.size = strlen((const char *)data_block);  // Atualiza o tamanho do arquivo
-    write_block("filesystem.dat", file_block, data_block);  // Grava os dados no bloco do arquivo
-    printf("Dados anexados em '%s'.\n", path);
+    // Lê o conteúdo do último bloco
+    read_block("filesystem.dat", current_block, data_block);
+    int offset = strlen((char *)data_block);  // Posição para anexar novos dados no bloco atual
+
+    // Anexa os dados ao arquivo
+    int bytes_written = 0;
+    while (bytes_written < data_length) {
+        // Preenche o bloco restante
+        int bytes_to_copy = (data_length - bytes_written > BLOCK_SIZE - offset) 
+                            ? (BLOCK_SIZE - offset) 
+                            : (data_length - bytes_written);
+        for (int i = 0; i < bytes_to_copy; i++) {
+            data_block[offset + i] = data[(bytes_written + i) % strlen(data)];
+        }
+        bytes_written += bytes_to_copy;
+        offset += bytes_to_copy;
+
+        if (offset == BLOCK_SIZE) {  // Bloco está cheio, precisa de um novo
+            write_block("filesystem.dat", current_block, data_block);
+
+            int next_block = allocate_blocks(1);
+            if (next_block == -1) {
+                printf("Erro: Não foi possível alocar mais blocos para o arquivo '%s'.\n", path);
+                return;
+            }
+
+            fat[current_block] = next_block;  // Atualiza a FAT
+            current_block = next_block;
+            offset = 0;  // Reinicia o offset para o novo bloco
+            memset(data_block, 0, BLOCK_SIZE);  // Limpa o novo bloco
+        }
+    }
+
+    // Escreve o último bloco
+    write_block("filesystem.dat", current_block, data_block);
+    fat[current_block] = 0x7fff;  // Marca o último bloco como fim de arquivo
+
+    // Atualiza o tamanho do arquivo na entrada do diretório
+    int parent_block = find_directory_block(path);
+    read_block("filesystem.dat", parent_block, data_block);
+    for (int i = 0; i < DIR_ENTRIES; i++) {
+        memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+        if (strcmp((const char *)entry.filename, path + 1) == 0) { // Compara com o nome do arquivo
+            entry.size += data_length;  // Atualiza o tamanho
+            memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
+            write_block("filesystem.dat", parent_block, data_block);  // Atualiza o diretório no disco
+            break;
+        }
+    }
+
+    // Atualiza a FAT no disco
+    write_fat("filesystem.dat", fat);
+
+    printf("Dados anexados no arquivo '%s'.\n", path);
 }
 
 void read(const char *path) {
-    struct dir_entry_s entry;
-    int file_block = find_file_block(path);  // Use find_file_block para localizar o arquivo
+    int file_block = find_file_block(path);
 
     if (file_block == -1) {
         printf("Erro: Arquivo '%s' não encontrado.\n", path);
         return;
     }
 
-    // Lê o conteúdo do bloco do arquivo
-    read_block("filesystem.dat", file_block, data_block);
-    printf("Conteúdo de '%s':\n%s\n", path, data_block);
+    printf("Conteúdo de '%s':\n", path);
+
+    int current_block = file_block;
+    while (current_block != 0x7fff) {
+        // Lê o conteúdo do bloco atual
+        read_block("filesystem.dat", current_block, data_block);
+        printf("%s", data_block); // Exibe o conteúdo do bloco
+
+        // Avança para o próximo bloco
+        current_block = fat[current_block];
+    }
+    printf("\n");
 }
 
 void export_fat_to_file(const char *filename) {
