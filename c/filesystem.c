@@ -442,21 +442,75 @@ void delete(const char *path) {
 /* Função para sobrescrever dados em um arquivo */
 void write(const char *data, int rep, const char *path) {
     struct dir_entry_s entry;
-    int file_block = find_file_block(path);  // Use find_file_block para localizar o arquivo
+    int file_block = find_file_block(path);
 
     if (file_block == -1) {
         printf("Erro: Arquivo '%s' não encontrado.\n", path);
         return;
     }
 
-    memset(data_block, 0, BLOCK_SIZE);  // Limpa o conteúdo do bloco de dados
-    for (int j = 0; j < rep; j++) {
-        strcat((char *)data_block, data);
+    // Zera todos os blocos associados ao arquivo atual
+    int current_block = file_block;
+    while (current_block != 0x7fff) {
+        int next_block = fat[current_block];
+        fat[current_block] = 0x0000; // Marca como livre
+        current_block = next_block;
     }
 
-    entry.size = strlen((const char *)data_block);  // Atualiza o tamanho do arquivo
-    write_block("filesystem.dat", file_block, data_block);  // Grava os dados no bloco do arquivo
-    printf("Dados sobrescritos em '%s'.\n", path);
+    // Calcula o tamanho total dos dados a serem escritos
+    int data_length = strlen(data) * rep;
+    int bytes_written = 0;
+
+    // Aloca novos blocos e escreve os dados
+    current_block = allocate_blocks(1);
+    if (current_block == -1) {
+        printf("Erro: Não foi possível alocar blocos para o arquivo '%s'.\n", path);
+        return;
+    }
+
+    int first_block = current_block; // Primeiro bloco do arquivo
+
+    while (bytes_written < data_length) {
+        memset(data_block, 0, BLOCK_SIZE); // Limpa o conteúdo do bloco
+
+        // Copia os próximos bytes do dado para o bloco
+        int bytes_to_copy = (data_length - bytes_written > BLOCK_SIZE) ? BLOCK_SIZE : (data_length - bytes_written);
+        strncpy((char *)data_block, data + (bytes_written % strlen(data)), bytes_to_copy);
+        write_block("filesystem.dat", current_block, data_block);
+
+        bytes_written += bytes_to_copy;
+
+        if (bytes_written < data_length) {
+            int next_block = allocate_blocks(1);
+            if (next_block == -1) {
+                printf("Erro: Não foi possível alocar mais blocos para o arquivo '%s'.\n", path);
+                return;
+            }
+            fat[current_block] = next_block; // Encadeia na FAT
+            current_block = next_block;
+        } else {
+            fat[current_block] = 0x7fff; // Marca o último bloco como fim de arquivo
+        }
+    }
+
+    // Atualiza o tamanho do arquivo na entrada do diretório
+    int parent_block = find_directory_block(path);
+    read_block("filesystem.dat", parent_block, data_block);
+    for (int i = 0; i < DIR_ENTRIES; i++) {
+        memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+        if (strcmp((const char *)entry.filename, path + 1) == 0) { // Compara com o nome do arquivo
+            entry.size = data_length; // Atualiza o tamanho
+            entry.first_block = first_block; // Atualiza o primeiro bloco
+            memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
+            write_block("filesystem.dat", parent_block, data_block); // Atualiza o diretório no disco
+            break;
+        }
+    }
+
+    // Atualiza a FAT no disco
+    write_fat("filesystem.dat", fat);
+
+    printf("Dados sobrescritos no arquivo '%s'.\n", path);
 }
 
 void append(const char *data, int rep, const char *path) {
@@ -500,54 +554,63 @@ void export_fat_to_file(const char *filename) {
         return;
     }
 
-    fprintf(f, "Tabela de Alocação de Arquivos (FAT):\n");
+    fprintf(f, "=== Tabela de Alocação de Arquivos (FAT) ===\n");
+
+    // Array para associar nomes aos blocos
+    char block_names[BLOCKS][26]; // 25 caracteres para o nome + '\0'
+    for (int i = 0; i < BLOCKS; i++) {
+        strcpy(block_names[i], ""); // Inicializa com strings vazias
+    }
+
+    // Função para percorrer diretórios e mapear nomes aos blocos
+    void map_directory(uint32_t block) {
+        struct dir_entry_s entry;
+        uint8_t dir_data[BLOCK_SIZE];
+
+        read_block("filesystem.dat", block, dir_data);
+        for (int i = 0; i < DIR_ENTRIES; i++) {
+            memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+            if (entry.attributes != 0x00) { // Entrada válida
+                strcpy(block_names[entry.first_block], entry.filename);
+
+                // Se for diretório, faça uma chamada recursiva para mapear suas entradas
+                if (entry.attributes == 0x02) {
+                    map_directory(entry.first_block);
+                }
+            }
+        }
+    }
+
+    map_directory(ROOT_BLOCK);
+
+    // Imprime os estados da FAT com os nomes mapeados
     for (int i = 0; i < BLOCKS; i++) {
         if (i < FAT_BLOCKS) {
-            fprintf(f, "Bloco %d: Reservado para FAT\n", i);
+            fprintf(f, "Bloco %d: Reservado para FAT [Código: 0x7ffe]\n", i);
         } else if (i == ROOT_BLOCK) {
-            fprintf(f, "Bloco %d: Diretório raiz\n", i);
+            fprintf(f, "Bloco %d: Diretório raiz [Código: 0x7fff]\n", i);
         } else if (fat[i] == 0x0000) {
-            fprintf(f, "Bloco %d: Livre\n", i);
+            fprintf(f, "Bloco %d: Livre [Código: 0x0000]\n", i);
         } else if (fat[i] == 0x7fff) {
-            fprintf(f, "Bloco %d: Fim de arquivo ou diretório\n", i);
+            if (strlen(block_names[i]) > 0) {
+                fprintf(f, "Bloco %d: Fim de arquivo (%s) [Código: 0x7fff]\n", i, block_names[i]);
+            } else {
+                fprintf(f, "Bloco %d: Fim de arquivo ou diretório [Código: 0x7fff]\n", i);
+            }
         } else if (fat[i] >= 0x0001 && fat[i] <= 0x7ffd) {
-            fprintf(f, "Bloco %d: Alocado - Próximo bloco %d\n", i, fat[i]);
+            // Verifica se este bloco pertence a um arquivo maior
+            if (strlen(block_names[i]) > 0) {
+                fprintf(f, "Bloco %d: Alocado para (%s) - Próximo bloco %d [Código: 0x%04x]\n", i, block_names[i], fat[i], fat[i]);
+            } else {
+                fprintf(f, "Bloco %d: Alocado - Próximo bloco %d [Código: 0x%04x]\n", i, fat[i], fat[i]);
+            }
         } else {
-            fprintf(f, "Bloco %d: Estado desconhecido (valor: 0x%04x)\n", i, fat[i]);
+            fprintf(f, "Bloco %d: Estado desconhecido [Código: 0x%04x]\n", i, fat[i]);
         }
     }
 
     fclose(f);
-    printf("Tabela FAT exportada para o arquivo '%s'.\n", filename);
-}
-
-void test_directory_limit() {
-    printf("=== Testando Limite de 32 Entradas em um Diretório ===\n");
-
-    // Inicializa o sistema de arquivos
-    init_filesystem();
-
-    // Cria um diretório /dir1
-    printf("Criando diretório /dir1...\n");
-    mkdir("/dir1");
-
-    // Adiciona 32 arquivos dentro de /dir1
-    char file_path[256];
-    for (int i = 1; i <= 32; i++) {
-        sprintf(file_path, "/dir1/file%d.txt", i);
-        printf("Criando arquivo: %s\n", file_path);
-        create(file_path);
-    }
-
-    // Tenta criar um 33º arquivo
-    printf("Tentando criar o 33º arquivo...\n");
-    create("/dir1/file33.txt");
-
-    // Tenta criar um subdiretório após 32 entradas
-    printf("Tentando criar um subdiretório...\n");
-    mkdir("/dir1/subdir1");
-
-    printf("=== Fim do Teste ===\n");
+    printf("Tabela FAT e informações exportadas para o arquivo '%s'.\n", filename);
 }
 
 /* Função main - ponto de entrada para o shell */
@@ -581,7 +644,7 @@ int main() {
             sscanf(command + 7, "%s", path);
             unlink(path);
         } else if (strncmp(command, "write", 5) == 0) {
-            char data[256], path[256];
+            char data[1024], path[256];
             int rep;
             sscanf(command + 6, "\"%[^\"]\" %d %s", data, &rep, path);
             write(data, rep, path);
@@ -600,8 +663,6 @@ int main() {
             char filename[256];
             sscanf(command + 7, "%s", filename);
             export_fat_to_file(filename);
-        } else if (strncmp(command, "test_limit", 10) == 0) {
-            test_directory_limit();
         } else {
             printf("Comando desconhecido: %s", command);
         }
