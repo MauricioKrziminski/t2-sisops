@@ -32,5 +32,6 @@ void read_fat(char *file, uint16_t *fat);
 void write_fat(char *file, uint16_t *fat);
 void init_filesystem();
 void load_filesystem();
+void map_directory(uint32_t block);
 
 #endif
