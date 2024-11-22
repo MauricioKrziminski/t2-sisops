@@ -36,38 +36,6 @@ void write_fat(char *file, uint16_t *fat) {
     fclose(f);
 }
 
-void print_fat() {
-    printf("Tabela de Alocação de Arquivos (FAT):\n");
-    for (int i = 0; i < BLOCKS; i++) {
-        if (i < FAT_BLOCKS) {
-            printf("Bloco %d: Reservado para FAT\n", i);
-        } else if (i == ROOT_BLOCK) {
-            printf("Bloco %d: Diretório raiz\n", i);
-        } else if (fat[i] == 0x0000) {
-            printf("Bloco %d: Livre\n", i);
-        } else if (fat[i] == 0x7fff) {
-            printf("Bloco %d: Fim de arquivo ou diretório\n", i);
-        } else if (fat[i] >= 0x0001 && fat[i] <= 0x7ffd) {
-            printf("Bloco %d: Alocado - Próximo bloco %d\n", i, fat[i]);
-        } else {
-            struct dir_entry_s entry;
-            read_block("filesystem.dat", i, data_block);
-
-            for (int j = 0; j < DIR_ENTRIES; j++) {
-                memcpy(&entry, &data_block[j * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-                if (entry.first_block == i) {
-                    if (entry.attributes == 0x01) {
-                        printf("Bloco %d: Arquivo '%s'\n", i, entry.filename);
-                    } else if (entry.attributes == 0x02) {
-                        printf("Bloco %d: Diretório '%s'\n", i, entry.filename);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
 void init_filesystem() {
     FILE *f;
     int i;
@@ -236,8 +204,12 @@ void ls(const char *path) {
         printf("Listando o diretório: %s\n", path);
         for (int i = 0; i < DIR_ENTRIES; i++) {
             memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-            if (entry.attributes != 0x00) { // Entrada não vazia
+            if (entry.attributes != 0x00) {
                 printf("%s - %s\n", entry.filename, (entry.attributes == 0x01) ? "Arquivo" : "Diretório");
+                printf("Tamanho: %d bytes\n", entry.size);
+                printf("Bloco inicial: %d\n", entry.first_block);
+                printf("File attributes: %d\n", entry.attributes);
+                printf("Nome do arquivo: %s\n", entry.filename);
             }
         }
         return;
@@ -415,7 +387,13 @@ void unlink(const char *path) {
         }
     }
 
-    fat[entry.first_block] = 0x0000;
+    int current_block = entry.first_block;
+    while (current_block != 0x7fff) {
+        int next_block = fat[current_block];
+        fat[current_block] = 0x0000;
+        current_block = next_block;
+    }
+
     memset(&data_block[entry_index * DIR_ENTRY_SIZE], 0, DIR_ENTRY_SIZE);
     write_block("filesystem.dat", parent_block, data_block);
     write_fat("filesystem.dat", fat);
@@ -662,8 +640,6 @@ int main() {
             char path[256];
             sscanf(command + 7, "%s", path);
             create(path);
-        } else if (strncmp(command, "showfat", 7) == 0) {
-            print_fat();
         } else if (strncmp(command, "unlink", 6) == 0) {
             char path[256];
             sscanf(command + 7, "%s", path);
