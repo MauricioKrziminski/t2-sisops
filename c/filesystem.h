@@ -37,6 +37,7 @@ int find_directory_block(const char *path);
 int find_file_block(const char *path);
 void free_blocks_recursively(uint32_t block, uint8_t attributes);
 int is_directory_empty(uint32_t block);
+int update_directory_entry(int parent_block, struct dir_entry_s *new_entry);
 
 /* Funções de comandos */
 void ls(const char *path);
