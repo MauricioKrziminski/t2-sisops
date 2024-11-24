@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+
 #include "filesystem.h"
 
 uint16_t fat[BLOCKS];
@@ -65,6 +66,40 @@ void init_filesystem() {
     printf("Sistema de arquivos inicializado.\n");
 }
 
+void free_blocks_recursively(uint32_t block, uint8_t attributes) {
+    if (attributes == 0x01) {
+        // É um arquivo, liberar blocos de dados
+        int current_block = block;
+        while (current_block != 0x7fff) {
+            int next_block = fat[current_block];
+            fat[current_block] = 0x0000;
+            current_block = next_block;
+        }
+    } else if (attributes == 0x02) {
+        // É um diretório, percorrer recursivamente
+        struct dir_entry_s entry;
+        uint8_t dir_data[BLOCK_SIZE];
+
+        read_block("filesystem.dat", block, dir_data);
+
+        for (int i = 0; i < DIR_ENTRIES; i++) {
+            memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+            if (entry.attributes != 0x00) {
+                // Chamada recursiva para subdiretórios ou arquivos
+                free_blocks_recursively(entry.first_block, entry.attributes);
+                // Limpar a entrada do diretório
+                memset(&dir_data[i * DIR_ENTRY_SIZE], 0, DIR_ENTRY_SIZE);
+            }
+        }
+
+        // Escrever as alterações no diretório
+        write_block("filesystem.dat", block, dir_data);
+
+        // Liberar o bloco do diretório
+        fat[block] = 0x0000;
+    }
+}
+
 int allocate_blocks(int num_blocks) {
     int first_block = -1;
     int last_allocated = -1;
@@ -91,50 +126,77 @@ int allocate_blocks(int num_blocks) {
     }
 }
 
-int find_file_block(const char *path) {
-    struct dir_entry_s entry;
+int find_file_block_recursive(const char *path, uint32_t current_block) {
     char temp_path[256];
-    char *token;
-    uint32_t current_block = ROOT_BLOCK;
+    char *next_token;
+    struct dir_entry_s entry;
 
     strncpy(temp_path, path, sizeof(temp_path));
     temp_path[sizeof(temp_path) - 1] = '\0';
 
-    token = strtok(temp_path, "/");
+    char *token = strtok_r(temp_path, "/", &next_token);
+
+    read_block("filesystem.dat", current_block, data_block);
+
     while (token != NULL) {
         int found = 0;
-
-        read_block("filesystem.dat", current_block, data_block);
 
         for (int i = 0; i < DIR_ENTRIES; i++) {
             memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
 
             if (strncmp((const char *)entry.filename, token, 25) == 0) {
-                if (entry.attributes == 0x01) { 
-                    if ((token = strtok(NULL, "/")) == NULL) {
-                        return entry.first_block;
-                    } else {
-                        printf("Erro: '%s' é um arquivo, não um diretório.\n", token);
-                        return -1;
-                    }
-                } else if (entry.attributes == 0x02) {
-                    current_block = entry.first_block;
-                    found = 1;
-                    break;
+                if (entry.attributes == 0x02) {
+                    // É um diretório, continuar recursivamente
+                    return find_file_block_recursive(next_token, entry.first_block);
+                } else if (entry.attributes == 0x01 && next_token == NULL) {
+                    // Encontrou o arquivo
+                    return entry.first_block;
+                } else {
+                    // É um arquivo, mas ainda há tokens no caminho
+                    printf("Erro: '%s' é um arquivo, não um diretório.\n", token);
+                    return -1;
                 }
             }
         }
 
         if (!found) {
-            printf("Erro: Caminho '%s' não encontrado no diretório '%s'.\n", path, token);
+            printf("Erro: '%s' não encontrado.\n", token);
             return -1;
         }
 
-        token = strtok(NULL, "/");
+        token = strtok_r(NULL, "/", &next_token);
     }
 
-    printf("Erro: Arquivo '%s' não encontrado.\n", path);
+    // Arquivo não encontrado
     return -1;
+}
+
+int find_file_block(const char *path) {
+    // Remover barra inicial se houver
+    const char *clean_path = (path[0] == '/') ? path + 1 : path;
+    return find_file_block_recursive(clean_path, ROOT_BLOCK);
+}
+
+int is_directory_empty(uint32_t block) {
+    struct dir_entry_s entry;
+    uint8_t dir_data[BLOCK_SIZE];
+
+    read_block("filesystem.dat", block, dir_data);
+
+    for (int i = 0; i < DIR_ENTRIES; i++) {
+        memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+        if (entry.attributes != 0x00) {
+            // Se for um diretório, verificar recursivamente
+            if (entry.attributes == 0x02) {
+                if (!is_directory_empty(entry.first_block)) {
+                    return 0; // Diretório não está vazio
+                }
+            } else {
+                return 0; // Encontrou um arquivo, diretório não está vazio
+            }
+        }
+    }
+    return 1; // Diretório está vazio
 }
 
 void load_filesystem() {
@@ -146,39 +208,39 @@ void load_filesystem() {
     printf("Sistema de arquivos carregado.\n");
 }
 
-int find_directory_block(const char *path) {
-    struct dir_entry_s entry;
+int find_directory_block_recursive(const char *path, uint32_t current_block) {
+    if (strcmp(path, "") == 0 || strcmp(path, "/") == 0) {
+        return current_block; // Diretório atual
+    }
+
     char temp_path[256];
-    char *token;
-    uint32_t current_block = ROOT_BLOCK;
+    char *next_token;
+    struct dir_entry_s entry;
 
     strncpy(temp_path, path, sizeof(temp_path));
     temp_path[sizeof(temp_path) - 1] = '\0';
 
-    token = strtok(temp_path, "/");
-    while (token != NULL) {
-        int found = 0;
+    char *token = strtok_r(temp_path, "/", &next_token);
 
-        read_block("filesystem.dat", current_block, data_block);
+    read_block("filesystem.dat", current_block, data_block);
 
-        for (int i = 0; i < DIR_ENTRIES; i++) {
-            memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
+    for (int i = 0; i < DIR_ENTRIES; i++) {
+        memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
 
-            if (entry.attributes == 0x02 && strncmp((const char *)entry.filename, token, 25) == 0) {
-                current_block = entry.first_block;
-                found = 1;
-                break;
-            }
+        if (entry.attributes == 0x02 && strncmp((const char *)entry.filename, token, 25) == 0) {
+            // Encontrou o diretório, continuar recursivamente
+            return find_directory_block_recursive(next_token, entry.first_block);
         }
-
-        if (!found) {
-            return -1;
-        }
-
-        token = strtok(NULL, "/");
     }
 
-    return current_block;
+    // Diretório não encontrado
+    return -1;
+}
+
+int find_directory_block(const char *path) {
+    // Remover barra inicial se houver
+    const char *clean_path = (path[0] == '/') ? path + 1 : path;
+    return find_directory_block_recursive(clean_path, ROOT_BLOCK);
 }
 
 int count_entries(uint8_t *data_block) {
@@ -198,27 +260,26 @@ void ls(const char *path) {
     struct dir_entry_s entry;
     int block;
 
-    block = find_directory_block(path);
+    block = (strlen(path) == 0 || strcmp(path, "/") == 0) ? ROOT_BLOCK : find_directory_block(path);
+
     if (block != -1) {
         read_block("filesystem.dat", block, data_block);
-        printf("Listando o diretório: %s\n", path);
+        printf("Listando o diretório '%s':\n", path);
         for (int i = 0; i < DIR_ENTRIES; i++) {
             memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
             if (entry.attributes != 0x00) {
-                printf("%s - %s\n", entry.filename, (entry.attributes == 0x01) ? "Arquivo" : "Diretório");
-                printf("Tamanho: %d bytes\n", entry.size);
-                printf("Bloco inicial: %d\n", entry.first_block);
-                printf("File attributes: %d\n", entry.attributes);
-                printf("Nome do arquivo: %s\n", entry.filename);
+                printf("%s\t%s\t%d bytes\n",
+                    entry.filename,
+                    (entry.attributes == 0x01) ? "Arquivo" : "Diretório",
+                    entry.size);
             }
         }
         return;
     }
 
-    block = find_file_block(path);
-    if (block != -1) {
-        printf("Informações do arquivo '%s':\n", path);
-        printf("Bloco inicial: %d\n", block);
+    int file_block = find_file_block(path);
+    if (file_block != -1) {
+        printf("Arquivo '%s' encontrado. Bloco inicial: %d\n", path, file_block);
         return;
     }
 
@@ -228,31 +289,39 @@ void ls(const char *path) {
 void mkdir(const char *path) {
     struct dir_entry_s entry;
     char dir_name[25];
-    int parent_block, dir_block;
+    int parent_block;
 
-    char *last_slash = strrchr(path, '/');
+    // Separar o caminho do nome do diretório
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path));
+    temp_path[sizeof(temp_path) - 1] = '\0';
+
+    char *last_slash = strrchr(temp_path, '/');
     if (last_slash == NULL) {
         printf("Erro: Caminho inválido.\n");
         return;
     }
 
+    // Extrair o nome do diretório
     strncpy(dir_name, last_slash + 1, 25);
     dir_name[24] = '\0';
-    *last_slash = '\0';
-    parent_block = find_directory_block(path);
-    *last_slash = '/';
+
+    // Se o diretório estiver na raiz
+    if (last_slash == temp_path) {
+        parent_block = ROOT_BLOCK;
+    } else {
+        *last_slash = '\0';
+        parent_block = find_directory_block(temp_path);
+        *last_slash = '/';
+    }
 
     if (parent_block == -1) {
-        printf("Erro: Caminho '%s' não encontrado.\n", path);
+        printf("Erro: Caminho '%s' não encontrado.\n", temp_path);
         return;
     }
 
+    // Verificar se já existe um diretório ou arquivo com o mesmo nome
     read_block("filesystem.dat", parent_block, data_block);
-    if (count_entries(data_block) >= 32) {
-        printf("Erro: O diretório está cheio. Não é possível criar mais entradas.\n");
-        return;
-    }
-
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
         if (entry.attributes != 0x00 && strncmp((const char *)entry.filename, dir_name, 25) == 0) {
@@ -261,19 +330,28 @@ void mkdir(const char *path) {
         }
     }
 
-    dir_block = allocate_blocks(1);
+    // Criar o novo diretório
+    int dir_block = allocate_blocks(1);
     if (dir_block == -1) return;
 
+    // Inicializar o novo diretório
+    memset(data_block, 0, BLOCK_SIZE);
+    write_block("filesystem.dat", dir_block, data_block);
+
+    // Adicionar a entrada no diretório pai
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
         if (entry.attributes == 0x00) {
             strncpy((char *)entry.filename, dir_name, 25);
-            entry.attributes = 0x02;
+            entry.filename[24] = '\0';
+            entry.attributes = 0x02; // Diretório
             entry.first_block = dir_block;
             entry.size = 0;
 
             memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
             write_block("filesystem.dat", parent_block, data_block);
+            write_fat("filesystem.dat", fat);
+
             printf("Diretório '%s' criado no caminho '%s'.\n", dir_name, path);
             return;
         }
@@ -285,9 +363,13 @@ void mkdir(const char *path) {
 void create(const char *path) {
     struct dir_entry_s entry;
     char file_name[25];
-    int parent_block, file_block;
+    int parent_block;
 
-    char *last_slash = strrchr(path, '/');
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path));
+    temp_path[sizeof(temp_path) - 1] = '\0';
+
+    char *last_slash = strrchr(temp_path, '/');
     if (last_slash == NULL) {
         printf("Erro: Caminho inválido.\n");
         return;
@@ -295,21 +377,21 @@ void create(const char *path) {
 
     strncpy(file_name, last_slash + 1, 25);
     file_name[24] = '\0';
-    *last_slash = '\0';
-    parent_block = find_directory_block(path);
-    *last_slash = '/';
+
+    if (last_slash == temp_path) {
+        parent_block = ROOT_BLOCK;
+    } else {
+        *last_slash = '\0';
+        parent_block = find_directory_block(temp_path);
+        *last_slash = '/';
+    }
 
     if (parent_block == -1) {
-        printf("Erro: Caminho '%s' não encontrado.\n", path);
+        printf("Erro: Caminho '%s' não encontrado.\n", temp_path);
         return;
     }
 
     read_block("filesystem.dat", parent_block, data_block);
-    if (count_entries(data_block) >= 32) {
-        printf("Erro: O diretório está cheio. Não é possível criar mais entradas.\n");
-        return;
-    }
-
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
         if (entry.attributes != 0x00 && strncmp((const char *)entry.filename, file_name, 25) == 0) {
@@ -318,19 +400,26 @@ void create(const char *path) {
         }
     }
 
-    file_block = allocate_blocks(1);
+    int file_block = allocate_blocks(1);
     if (file_block == -1) return;
+
+    // Inicializar o bloco de dados do arquivo
+    memset(data_block, 0, BLOCK_SIZE);
+    write_block("filesystem.dat", file_block, data_block);
 
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
         if (entry.attributes == 0x00) {
             strncpy((char *)entry.filename, file_name, 25);
-            entry.attributes = 0x01;
+            entry.filename[24] = '\0';
+            entry.attributes = 0x01; // Arquivo
             entry.first_block = file_block;
             entry.size = 0;
 
             memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
             write_block("filesystem.dat", parent_block, data_block);
+            write_fat("filesystem.dat", fat);
+
             printf("Arquivo '%s' criado no caminho '%s'.\n", file_name, path);
             return;
         }
@@ -376,24 +465,17 @@ void unlink(const char *path) {
     }
 
     if (entry.attributes == 0x02) {
-        struct dir_entry_s check;
-        read_block("filesystem.dat", entry.first_block, data_block);
-        for (int i = 0; i < DIR_ENTRIES; i++) {
-            memcpy(&check, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-            if (check.attributes != 0x00) {
-                printf("Erro: Diretório '%s' não está vazio.\n", name);
-                return;
-            }
+        // Verificar recursivamente se o diretório está vazio
+        if (!is_directory_empty(entry.first_block)) {
+            printf("Erro: Diretório '%s' não está vazio.\n", name);
+            return;
         }
     }
 
-    int current_block = entry.first_block;
-    while (current_block != 0x7fff) {
-        int next_block = fat[current_block];
-        fat[current_block] = 0x0000;
-        current_block = next_block;
-    }
+    // Liberar os blocos alocados (recursivamente se for um diretório)
+    free_blocks_recursively(entry.first_block, entry.attributes);
 
+    // Remover a entrada do diretório
     memset(&data_block[entry_index * DIR_ENTRY_SIZE], 0, DIR_ENTRY_SIZE);
     write_block("filesystem.dat", parent_block, data_block);
     write_fat("filesystem.dat", fat);
@@ -401,7 +483,9 @@ void unlink(const char *path) {
     printf("Arquivo ou diretório '%s' excluído.\n", name);
 }
 
-void write(const char *data, int rep, const char *path) {
+
+
+void write_data(const char *data, int rep, const char *path) {
     struct dir_entry_s entry;
     int file_block = find_file_block(path);
 
@@ -410,6 +494,26 @@ void write(const char *data, int rep, const char *path) {
         return;
     }
 
+    // Encontrar a entrada do arquivo no diretório pai
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path));
+    temp_path[sizeof(temp_path) - 1] = '\0';
+
+    char *last_slash = strrchr(temp_path, '/');
+    char file_name[25];
+    strncpy(file_name, last_slash + 1, 25);
+    file_name[24] = '\0';
+    *last_slash = '\0';
+
+    int parent_block = (strlen(temp_path) == 0) ? ROOT_BLOCK : find_directory_block(temp_path);
+    *last_slash = '/';
+
+    if (parent_block == -1) {
+        printf("Erro: Diretório pai não encontrado.\n");
+        return;
+    }
+
+    // Remover blocos antigos
     int current_block = file_block;
     while (current_block != 0x7fff) {
         int next_block = fat[current_block];
@@ -417,33 +521,32 @@ void write(const char *data, int rep, const char *path) {
         current_block = next_block;
     }
 
-    int data_length = strlen(data) * rep;
+    // Escrever os novos dados
+    int data_length = strlen(data);
+    int total_length = data_length * rep;
     int bytes_written = 0;
 
-    current_block = allocate_blocks(1);
-    if (current_block == -1) {
+    int first_block = allocate_blocks(1);
+    if (first_block == -1) {
         printf("Erro: Não foi possível alocar blocos para o arquivo '%s'.\n", path);
         return;
     }
 
-    int first_block = current_block;
+    current_block = first_block;
 
-    while (bytes_written < data_length) {
+    while (bytes_written < total_length) {
         memset(data_block, 0, BLOCK_SIZE);
-
-        int bytes_to_copy = (data_length - bytes_written > BLOCK_SIZE) ? BLOCK_SIZE : (data_length - bytes_written);
-        for (int i = 0; i < bytes_to_copy; i++) {
-            data_block[i] = data[(bytes_written + i) % strlen(data)];
+        int to_write = (total_length - bytes_written > BLOCK_SIZE) ? BLOCK_SIZE : total_length - bytes_written;
+        for (int i = 0; i < to_write; i++) {
+            data_block[i] = data[(bytes_written + i) % data_length];
         }
-
         write_block("filesystem.dat", current_block, data_block);
-        bytes_written += bytes_to_copy;
+        bytes_written += to_write;
 
-        if (bytes_written < data_length) {
-
+        if (bytes_written < total_length) {
             int next_block = allocate_blocks(1);
             if (next_block == -1) {
-                printf("Erro: Não foi possível alocar mais blocos para o arquivo '%s'.\n", path);
+                printf("Erro: Não foi possível alocar mais blocos.\n");
                 return;
             }
             fat[current_block] = next_block;
@@ -453,13 +556,13 @@ void write(const char *data, int rep, const char *path) {
         }
     }
 
-    int parent_block = find_directory_block(path);
+    // Atualizar a entrada do arquivo no diretório pai
     read_block("filesystem.dat", parent_block, data_block);
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-        if (strcmp((const char *)entry.filename, path + 1) == 0) {
-            entry.size = data_length;
+        if (entry.attributes == 0x01 && strcmp((const char *)entry.filename, file_name) == 0) {
             entry.first_block = first_block;
+            entry.size = total_length;
             memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
             write_block("filesystem.dat", parent_block, data_block);
             break;
@@ -468,10 +571,10 @@ void write(const char *data, int rep, const char *path) {
 
     write_fat("filesystem.dat", fat);
 
-    printf("Dados sobrescritos no arquivo '%s'.\n", path);
+    printf("Dados escritos no arquivo '%s'.\n", path);
 }
 
-void append(const char *data, int rep, const char *path) {
+void append_data(const char *data, int rep, const char *path) {
     struct dir_entry_s entry;
     int file_block = find_file_block(path);
 
@@ -480,36 +583,54 @@ void append(const char *data, int rep, const char *path) {
         return;
     }
 
-    int data_length = strlen(data) * rep;
+    // Encontrar a entrada do arquivo no diretório pai
+    char temp_path[256];
+    strncpy(temp_path, path, sizeof(temp_path));
+    temp_path[sizeof(temp_path) - 1] = '\0';
 
+    char *last_slash = strrchr(temp_path, '/');
+    char file_name[25];
+    strncpy(file_name, last_slash + 1, 25);
+    file_name[24] = '\0';
+    *last_slash = '\0';
+
+    int parent_block = (strlen(temp_path) == 0) ? ROOT_BLOCK : find_directory_block(temp_path);
+    *last_slash = '/';
+
+    if (parent_block == -1) {
+        printf("Erro: Diretório pai não encontrado.\n");
+        return;
+    }
+
+    // Encontrar o último bloco do arquivo
     int current_block = file_block;
     while (fat[current_block] != 0x7fff) {
         current_block = fat[current_block];
     }
 
+    // Ler o último bloco para verificar espaço livre
     read_block("filesystem.dat", current_block, data_block);
     int offset = strlen((char *)data_block);
 
+    int data_length = strlen(data);
+    int total_length = data_length * rep;
     int bytes_written = 0;
-    while (bytes_written < data_length) {
-        int bytes_to_copy = (data_length - bytes_written > BLOCK_SIZE - offset) 
-                            ? (BLOCK_SIZE - offset) 
-                            : (data_length - bytes_written);
-        for (int i = 0; i < bytes_to_copy; i++) {
-            data_block[offset + i] = data[(bytes_written + i) % strlen(data)];
+
+    while (bytes_written < total_length) {
+        int to_write = (total_length - bytes_written > BLOCK_SIZE - offset) ? BLOCK_SIZE - offset : total_length - bytes_written;
+        for (int i = 0; i < to_write; i++) {
+            data_block[offset + i] = data[(bytes_written + i) % data_length];
         }
-        bytes_written += bytes_to_copy;
-        offset += bytes_to_copy;
+        offset += to_write;
+        bytes_written += to_write;
 
         if (offset == BLOCK_SIZE) {
             write_block("filesystem.dat", current_block, data_block);
-
             int next_block = allocate_blocks(1);
             if (next_block == -1) {
-                printf("Erro: Não foi possível alocar mais blocos para o arquivo '%s'.\n", path);
+                printf("Erro: Não foi possível alocar mais blocos.\n");
                 return;
             }
-
             fat[current_block] = next_block;
             current_block = next_block;
             offset = 0;
@@ -520,12 +641,12 @@ void append(const char *data, int rep, const char *path) {
     write_block("filesystem.dat", current_block, data_block);
     fat[current_block] = 0x7fff;
 
-    int parent_block = find_directory_block(path);
+    // Atualizar o tamanho do arquivo na entrada do diretório
     read_block("filesystem.dat", parent_block, data_block);
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &data_block[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-        if (strcmp((const char *)entry.filename, path + 1) == 0) {
-            entry.size += data_length;
+        if (entry.attributes == 0x01 && strcmp((const char *)entry.filename, file_name) == 0) {
+            entry.size += total_length;
             memcpy(&data_block[i * DIR_ENTRY_SIZE], &entry, sizeof(struct dir_entry_s));
             write_block("filesystem.dat", parent_block, data_block);
             break;
@@ -534,10 +655,10 @@ void append(const char *data, int rep, const char *path) {
 
     write_fat("filesystem.dat", fat);
 
-    printf("Dados anexados no arquivo '%s'.\n", path);
+    printf("Dados anexados ao arquivo '%s'.\n", path);
 }
 
-void read(const char *path) {
+void read_file(const char *path) {
     int file_block = find_file_block(path);
 
     if (file_block == -1) {
@@ -550,8 +671,7 @@ void read(const char *path) {
     int current_block = file_block;
     while (current_block != 0x7fff) {
         read_block("filesystem.dat", current_block, data_block);
-        printf("%s", data_block);
-
+        fwrite(data_block, 1, BLOCK_SIZE, stdout);
         current_block = fat[current_block];
     }
     printf("\n");
@@ -562,13 +682,22 @@ void map_directory(uint32_t block) {
     uint8_t dir_data[BLOCK_SIZE];
 
     read_block("filesystem.dat", block, dir_data);
+
     for (int i = 0; i < DIR_ENTRIES; i++) {
         memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
         if (entry.attributes != 0x00) {
             strcpy(block_names[entry.first_block], (char *)entry.filename);
 
             if (entry.attributes == 0x02) {
+                // Chamada recursiva para subdiretórios
                 map_directory(entry.first_block);
+            } else if (entry.attributes == 0x01) {
+                // Mapear os blocos de dados do arquivo
+                int current_block = entry.first_block;
+                while (current_block != 0x7fff) {
+                    strcpy(block_names[current_block], (char *)entry.filename);
+                    current_block = fat[current_block];
+                }
             }
         }
     }
@@ -629,40 +758,40 @@ int main() {
         } else if (strncmp(command, "load", 4) == 0) {
             load_filesystem();
         } else if (strncmp(command, "ls", 2) == 0) {
-            char path[256];
-            sscanf(command + 3, "%s", path);
+            char path[256] = "";
+            sscanf(command + 2, "%s", path);
             ls(path);
         } else if (strncmp(command, "mkdir", 5) == 0) {
             char path[256];
-            sscanf(command + 6, "%s", path);
+            sscanf(command + 5, "%s", path);
             mkdir(path);
         } else if (strncmp(command, "create", 6) == 0) {
             char path[256];
-            sscanf(command + 7, "%s", path);
+            sscanf(command + 6, "%s", path);
             create(path);
         } else if (strncmp(command, "unlink", 6) == 0) {
             char path[256];
-            sscanf(command + 7, "%s", path);
+            sscanf(command + 6, "%s", path);
             unlink(path);
         } else if (strncmp(command, "write", 5) == 0) {
             char data[1024], path[256];
             int rep;
-            sscanf(command + 6, "\"%[^\"]\" %d %s", data, &rep, path);
-            write(data, rep, path);
+            sscanf(command + 5, "\"%[^\"]\" %d %s", data, &rep, path);
+            write_data(data, rep, path);
         } else if (strncmp(command, "append", 6) == 0) {
-            char data[256], path[256];
+            char data[1024], path[256];
             int rep;
-            sscanf(command + 7, "\"%[^\"]\" %d %s", data, &rep, path);
-            append(data, rep, path);
+            sscanf(command + 6, "\"%[^\"]\" %d %s", data, &rep, path);
+            append_data(data, rep, path);
         } else if (strncmp(command, "read", 4) == 0) {
             char path[256];
-            sscanf(command + 5, "%s", path);
-            read(path);
+            sscanf(command + 4, "%s", path);
+            read_file(path);
         } else if (strncmp(command, "exit", 4) == 0) {
             break;
         } else if (strncmp(command, "export", 6) == 0) {
             char filename[256];
-            sscanf(command + 7, "%s", filename);
+            sscanf(command + 6, "%s", filename);
             export_fat_to_file(filename);
         } else {
             printf("Comando desconhecido: %s", command);
