@@ -557,66 +557,6 @@ void read(const char *path) {
     printf("\n");
 }
 
-void map_directory(uint32_t block) {
-    struct dir_entry_s entry;
-    uint8_t dir_data[BLOCK_SIZE];
-
-    read_block("filesystem.dat", block, dir_data);
-    for (int i = 0; i < DIR_ENTRIES; i++) {
-        memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-        if (entry.attributes != 0x00) {
-            strcpy(block_names[entry.first_block], (char *)entry.filename);
-
-            if (entry.attributes == 0x02) {
-                map_directory(entry.first_block);
-            }
-        }
-    }
-}
-
-void export_fat_to_file(const char *filename) {
-    FILE *f = fopen(filename, "w");
-    if (!f) {
-        printf("Erro: Não foi possível abrir o arquivo '%s' para escrita.\n", filename);
-        return;
-    }
-
-    fprintf(f, "=== Tabela de Alocação de Arquivos (FAT) ===\n");
-
-    for (int i = 0; i < BLOCKS; i++) {
-        strcpy(block_names[i], "");
-    }
-
-    map_directory(ROOT_BLOCK);
-
-    for (int i = 0; i < BLOCKS; i++) {
-        if (i < FAT_BLOCKS) {
-            fprintf(f, "Bloco %d: Reservado para FAT [Código: 0x7ffe]\n", i);
-        } else if (i == ROOT_BLOCK) {
-            fprintf(f, "Bloco %d: Diretório raiz [Código: 0x7fff]\n", i);
-        } else if (fat[i] == 0x0000) {
-            fprintf(f, "Bloco %d: Livre [Código: 0x0000]\n", i);
-        } else if (fat[i] == 0x7fff) {
-            if (strlen(block_names[i]) > 0) {
-                fprintf(f, "Bloco %d: Fim de arquivo (%s) [Código: 0x7fff]\n", i, block_names[i]);
-            } else {
-                fprintf(f, "Bloco %d: Fim de arquivo ou diretório [Código: 0x7fff]\n", i);
-            }
-        } else if (fat[i] >= 0x0001 && fat[i] <= 0x7ffd) {
-            if (strlen(block_names[i]) > 0) {
-                fprintf(f, "Bloco %d: Alocado para (%s) - Próximo bloco %d [Código: 0x%04x]\n", i, block_names[i], fat[i], fat[i]);
-            } else {
-                fprintf(f, "Bloco %d: Alocado - Próximo bloco %d [Código: 0x%04x]\n", i, fat[i], fat[i]);
-            }
-        } else {
-            fprintf(f, "Bloco %d: Estado desconhecido [Código: 0x%04x]\n", i, fat[i]);
-        }
-    }
-
-    fclose(f);
-    printf("Tabela FAT e informações exportadas para o arquivo '%s'.\n", filename);
-}
-
 int main() {
     char command[256];
 
@@ -660,10 +600,6 @@ int main() {
             read(path);
         } else if (strncmp(command, "exit", 4) == 0) {
             break;
-        } else if (strncmp(command, "export", 6) == 0) {
-            char filename[256];
-            sscanf(command + 7, "%s", filename);
-            export_fat_to_file(filename);
         } else {
             printf("Comando desconhecido: %s", command);
         }
