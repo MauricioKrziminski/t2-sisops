@@ -371,7 +371,7 @@ void create(const char *path) {
     struct dir_entry_s new_entry;
     strncpy((char *)new_entry.filename, file_name, sizeof(new_entry.filename));
     new_entry.filename[sizeof(new_entry.filename) - 1] = '\0';
-    new_entry.attributes = 0x01; // Arquivo
+    new_entry.attributes = 0x01;
     new_entry.first_block = file_block;
     new_entry.size = 0;
 
@@ -437,7 +437,7 @@ void unlink(const char *path) {
     printf("Arquivo ou diretório '%s' excluído.\n", name);
 }
 
-void write_data(const char *data, int rep, const char *path) {
+void write(const char *data, int rep, const char *path) {
     int file_block = find_file_block(path);
 
     if (file_block == -1) {
@@ -516,7 +516,7 @@ void write_data(const char *data, int rep, const char *path) {
     printf("Dados escritos no arquivo '%s'.\n", path);
 }
 
-void append_data(const char *data, int rep, const char *path) {
+void append(const char *data, int rep, const char *path) {
     int file_block = find_file_block(path);
 
     if (file_block == -1) {
@@ -590,7 +590,7 @@ void append_data(const char *data, int rep, const char *path) {
     printf("Dados anexados ao arquivo '%s'.\n", path);
 }
 
-void read_file(const char *path) {
+void read(const char *path) {
     int file_block = find_file_block(path);
 
     if (file_block == -1) {
@@ -608,34 +608,6 @@ void read_file(const char *path) {
         current_block = fat[current_block];
     }
     printf("\n");
-}
-
-void map_directory(uint32_t block) {
-    struct dir_entry_s entry;
-    uint8_t dir_data[BLOCK_SIZE];
-
-    read_block("filesystem.dat", block, dir_data);
-
-    for (int i = 0; i < BLOCKS; i++) {
-        strcpy(block_names[i], "");
-    }
-
-    for (int i = 0; i < DIR_ENTRIES; i++) {
-        memcpy(&entry, &dir_data[i * DIR_ENTRY_SIZE], sizeof(struct dir_entry_s));
-        if (entry.attributes != 0x00) {
-            strcpy(block_names[entry.first_block], (char *)entry.filename);
-
-            if (entry.attributes == 0x02) {
-                map_directory(entry.first_block);
-            } else if (entry.attributes == 0x01) {
-                int current_block = entry.first_block;
-                while (current_block != 0x7fff) {
-                    strcpy(block_names[current_block], (char *)entry.filename);
-                    current_block = fat[current_block];
-                }
-            }
-        }
-    }
 }
 
 int parse_write_append_command(const char *command, char *data, int *rep, char *path, const char *cmd_name) {
@@ -711,18 +683,18 @@ int main() {
             char data[1024], path[256];
             int rep;
             if (parse_write_append_command(command, data, &rep, path, "write") == 0) {
-                write_data(data, rep, path);
+                write(data, rep, path);
             }
         } else if (strncmp(command, "append", 6) == 0) {
             char data[1024], path[256];
             int rep;
             if (parse_write_append_command(command, data, &rep, path, "append") == 0) {
-                append_data(data, rep, path);
+                append(data, rep, path);
             }
         } else if (strncmp(command, "read", 4) == 0) {
             char path[256];
             sscanf(command + 4, "%s", path);
-            read_file(path);
+            read(path);
         } else if (strncmp(command, "exit", 4) == 0) {
             break;
         } else {
