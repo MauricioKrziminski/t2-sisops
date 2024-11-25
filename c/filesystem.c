@@ -723,10 +723,6 @@ int main() {
             char path[256];
             sscanf(command + 4, "%s", path);
             read_file(path);
-        } else if (strncmp(command, "export", 6) == 0) {
-            char filename[256];
-            sscanf(command + 6, "%s", filename);
-            export_fat_to_file(filename);
         } else if (strncmp(command, "exit", 4) == 0) {
             break;
         } else {
